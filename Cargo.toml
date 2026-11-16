@@ -1,6 +1,6 @@
 [package]
 name = "spider"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2024"
 description = "Spider: Discord Rich Presence without a token (debug port + IPC pipe), up to three cards"
 license = "MIT"
