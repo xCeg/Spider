@@ -8,9 +8,10 @@ use super::app::{App, FRAME, IDLE, Tone, card_title, view_of};
 use super::logo;
 use super::paint::{Canvas, Style, clip, ink, width};
 use super::preview::{self, CardView};
+use super::input::Input;
 use super::term::Key;
-use crate::config::{self, Activity, Button, PLATFORMS, STATUSES, Settings, TRANSPORTS};
-use crate::engine::{self, Client};
+use crate::config::{self, Activity, Button, PLATFORMS, STATUSES, Settings, TIMER_MODES, TRANSPORTS};
+use crate::engine::{self, Client, TimerMode};
 
 /// The corner pictures of the Spotify, YouTube and Twitch templates (Cinnabug's uploads).
 const SPOTIFY_ICON: &str = "https://files.catbox.moe/o1koxy.png";
@@ -110,7 +111,10 @@ enum Field {
     Status,
     Name,
     Details,
+    Rotation,
+    RotationSeconds,
     State,
+    Party,
     Image,
     ImageText,
     SmallImage,
@@ -122,15 +126,19 @@ enum Field {
     Label2,
     Link2,
     Timer,
+    Countdown,
 }
 
-const STEPS: [Field; 17] = [
+const STEPS: [Field; 21] = [
     Field::Template,
     Field::AppId,
     Field::Status,
     Field::Name,
     Field::Details,
+    Field::Rotation,
+    Field::RotationSeconds,
     Field::State,
+    Field::Party,
     Field::Image,
     Field::ImageText,
     Field::SmallImage,
@@ -142,6 +150,7 @@ const STEPS: [Field; 17] = [
     Field::Label2,
     Field::Link2,
     Field::Timer,
+    Field::Countdown,
 ];
 
 const STATUS_CHOICES: [(&str, &str); 5] = [
@@ -159,7 +168,22 @@ const PLATFORM_CHOICES: [(&str, &str); 4] = [
     ("Meta Quest", "pastille VR sur l'image"),
 ];
 
-const TIMER_CHOICES: [(&str, &str); 2] = [("Oui", "« 12:34 écoulées »"), ("Non", "pas de chronomètre")];
+/// The timer modes, then "none" (`config::TIMER_MODES` order).
+const TIMER_CHOICES: [(&str, &str); 4] = [
+    ("Depuis l'arrivée", "« 12:34 écoulées », remis à zéro au lancement"),
+    ("Heure actuelle", "affiche l'heure qu'il est"),
+    ("Compte à rebours", "« 12:34 restantes », puis recommence"),
+    ("Aucun", "pas de chronomètre"),
+];
+
+/// How often the first line changes, in seconds.
+const ROTATIONS: [u32; 4] = [15, 30, 60, 300];
+const ROTATION_CHOICES: [(&str, &str); 4] = [
+    ("15 secondes", "le plus rapide que Discord suit"),
+    ("30 secondes", ""),
+    ("1 minute", ""),
+    ("5 minutes", ""),
+];
 
 impl Field {
     fn title(self) -> &'static str {
@@ -169,7 +193,10 @@ impl Field {
             Field::Status => "Type d'activité",
             Field::Name => "Titre de la carte",
             Field::Details => "Première ligne",
+            Field::Rotation => "Rotation de la première ligne",
+            Field::RotationSeconds => "Vitesse de la rotation",
             Field::State => "Deuxième ligne",
+            Field::Party => "Groupe",
             Field::Image => "Grande image",
             Field::ImageText => "Texte de la grande image",
             Field::SmallImage => "Petite image",
@@ -181,6 +208,7 @@ impl Field {
             Field::Label2 => "Bouton 2 · texte",
             Field::Link2 => "Bouton 2 · lien",
             Field::Timer => "Chronomètre",
+            Field::Countdown => "Durée du compte à rebours",
         }
     }
 
@@ -194,8 +222,19 @@ impl Field {
             }
             Field::Status => "Le mot que Discord écrit devant le nom de l'application.",
             Field::Name => "Laisse vide pour garder le nom de l'application.",
-            Field::Details => "Le texte sous le titre. Vide = rien.",
-            Field::State => "Une ligne de plus, sous la première. Vide = rien.",
+            Field::Details => {
+                "Le texte sous le titre. Vide = rien. {heure}, {date} et {jour} se remplacent tout seuls."
+            }
+            Field::Rotation => {
+                "D'autres premières lignes, affichées à tour de rôle avec celle d'avant. Sépare-les par des points-virgules ; vide = pas de rotation."
+            }
+            Field::RotationSeconds => "Combien de temps chaque première ligne reste affichée.",
+            Field::State => {
+                "Une ligne de plus, sous la première. Vide = rien. {heure}, {date} et {jour} marchent aussi."
+            }
+            Field::Party => {
+                "« (2 sur 4) » après la deuxième ligne : la taille du groupe, une barre, le maximum. Vide = rien."
+            }
             Field::Image => {
                 "La clé d'une image de ton application (Rich Presence > Art Assets) ou un lien https:// vers une image. Vide = pas d'image."
             }
@@ -214,7 +253,10 @@ impl Field {
             Field::Link1 => "Où mène le bouton : un lien https://.",
             Field::Label2 => "Un second bouton. Vide = un seul bouton.",
             Field::Link2 => "Où mène le second bouton : un lien https://.",
-            Field::Timer => "Affiche depuis combien de temps la carte est en ligne.",
+            Field::Timer => "Ce que montre le chronomètre sous la carte.",
+            Field::Countdown => {
+                "En minutes, de 1 à 1440 (24 heures). Il recommence quand il arrive à zéro."
+            }
         }
     }
 
@@ -223,12 +265,15 @@ impl Field {
             Field::AppId => "ex. 123456789012345678",
             Field::Name => "vide = le nom de l'application",
             Field::Details => "ex. En train de coder",
-            Field::State => "ex. Projet Spider",
+            Field::Rotation => "ex. Je teste ; Je fais une pause",
+            Field::State => "ex. Il est {heure}",
+            Field::Party => "ex. 2/4",
             Field::Image | Field::SmallImage => "ex. logo   ou   https://exemple.com/image.png",
             Field::ImageText | Field::SmallText => "ex. Spider",
             Field::StreamUrl => "https://www.twitch.tv/ton_pseudo",
             Field::Label1 | Field::Label2 => "ex. Mon site",
             Field::Link1 | Field::Link2 => "https://",
+            Field::Countdown => "ex. 30",
             _ => "",
         }
     }
@@ -239,6 +284,7 @@ impl Field {
             Field::Status => Some(STATUS_CHOICES.to_vec()),
             Field::Platform => Some(PLATFORM_CHOICES.to_vec()),
             Field::Timer => Some(TIMER_CHOICES.to_vec()),
+            Field::RotationSeconds => Some(ROTATION_CHOICES.to_vec()),
             _ => None,
         }
     }
@@ -248,13 +294,21 @@ impl Field {
         match self {
             Field::Label1 | Field::Label2 => 32,
             Field::Link1 | Field::Link2 | Field::StreamUrl | Field::Image | Field::SmallImage => 512,
+            Field::Rotation => 600,
             Field::AppId => 24,
+            Field::Party => 15,
+            Field::Countdown => 4,
             _ => 128,
         }
     }
 
     fn optional(self) -> bool {
-        !matches!(self, Field::AppId | Field::Link1 | Field::Link2)
+        !matches!(self, Field::AppId | Field::Link1 | Field::Link2 | Field::Countdown)
+    }
+
+    /// Whether the picture keys of the application can complete this answer.
+    fn picture(self) -> bool {
+        matches!(self, Field::Image | Field::SmallImage)
     }
 
     /// Whether the question makes sense for this card.
@@ -271,12 +325,14 @@ impl Field {
         };
         match self {
             Field::Template => new_card,
+            Field::RotationSeconds => !card.rotation.is_empty(),
             Field::ImageText => !card.image.trim().is_empty(),
             Field::SmallText => !card.small_image.trim().is_empty(),
             Field::StreamUrl => config::kind(&card.status) == 1,
             Field::Link1 => label(0),
             Field::Label2 => label(0) && link(0),
             Field::Link2 => label(1),
+            Field::Countdown => card.timer && matches!(card.timer_mode(), TimerMode::Countdown(_)),
             _ => true,
         }
     }
@@ -302,9 +358,37 @@ impl Field {
             Field::Link1 | Field::Link2 if !config::is_url(value) => {
                 Err("le bouton a besoin d'un lien https://".to_owned())
             }
+            Field::Rotation => match lines(value).iter().find(|line| line.chars().count() > 128) {
+                Some(_) => Err("chaque ligne fait 128 caractères au plus".to_owned()),
+                None => Ok(()),
+            },
+            Field::Party if !value.is_empty() && party(value).is_none() => {
+                Err("écris la taille puis le maximum, par exemple 2/4".to_owned())
+            }
+            Field::Countdown => match value.parse::<u32>() {
+                Ok(1..=1440) => Ok(()),
+                _ => Err("un nombre de minutes, de 1 à 1440".to_owned()),
+            },
             _ => Ok(()),
         }
     }
+}
+
+/// The rotation's lines, from "one ; two ; three".
+fn lines(text: &str) -> Vec<String> {
+    text.split(';')
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// "2/4" (or "2 / 4", "2 sur 4") to (2, 4), when the group can exist.
+fn party(text: &str) -> Option<(u32, u32)> {
+    let text = text.replace("sur", "/");
+    let (size, max) = text.split_once('/')?;
+    let (size, max) = (size.trim().parse().ok()?, max.trim().parse().ok()?);
+    (1..=max).contains(&size).then_some((size, max))
 }
 
 fn button(card: &mut Activity, index: usize) -> &mut Button {
@@ -320,7 +404,12 @@ fn text_of(card: &Activity, field: Field) -> String {
         Field::AppId if card.app_id != 0 => card.app_id.to_string(),
         Field::Name => card.name.clone(),
         Field::Details => card.details.clone(),
+        Field::Rotation => card.rotation.join(" ; "),
         Field::State => card.state.clone(),
+        Field::Party => card
+            .party_size()
+            .map(|(size, max)| format!("{size}/{max}"))
+            .unwrap_or_default(),
         Field::Image => card.image.clone(),
         Field::ImageText => card.image_text.clone(),
         Field::SmallImage => card.small_image.clone(),
@@ -330,6 +419,7 @@ fn text_of(card: &Activity, field: Field) -> String {
         Field::Link1 => button(0).url,
         Field::Label2 => button(1).label,
         Field::Link2 => button(1).url,
+        Field::Countdown => card.countdown_minutes.clamp(1, 1440).to_string(),
         _ => String::new(),
     }
 }
@@ -339,7 +429,11 @@ fn set_text(card: &mut Activity, field: Field, value: String) {
         Field::AppId => card.app_id = config::parse_app_id(&value).unwrap_or(0),
         Field::Name => card.name = value,
         Field::Details => card.details = value,
+        Field::Rotation => card.rotation = lines(&value),
         Field::State => card.state = value,
+        Field::Party => {
+            card.party = party(&value).map_or_else(Vec::new, |(size, max)| vec![size, max]);
+        }
         Field::Image => card.image = value,
         Field::ImageText => card.image_text = value,
         Field::SmallImage => card.small_image = value,
@@ -349,6 +443,7 @@ fn set_text(card: &mut Activity, field: Field, value: String) {
         Field::Link1 => button(card, 0).url = value,
         Field::Label2 => button(card, 1).label = value,
         Field::Link2 => button(card, 1).url = value,
+        Field::Countdown => card.countdown_minutes = value.parse().unwrap_or(30),
         _ => {}
     }
 }
@@ -366,7 +461,16 @@ fn choice_of(card: &Activity, field: Field) -> usize {
                 .position(|each| *each == platform)
                 .unwrap_or(0)
         }
-        Field::Timer => usize::from(!card.timer),
+        Field::Timer if !card.timer => TIMER_CHOICES.len() - 1,
+        Field::Timer => match card.timer_mode() {
+            TimerMode::Start => 0,
+            TimerMode::Clock => 1,
+            TimerMode::Countdown(_) => 2,
+        },
+        Field::RotationSeconds => ROTATIONS
+            .iter()
+            .position(|seconds| *seconds >= card.rotation_seconds)
+            .unwrap_or(ROTATIONS.len() - 1),
         _ => 0,
     }
 }
@@ -395,7 +499,13 @@ fn set_choice(card: &mut Activity, field: Field, index: usize) {
         }
         Field::Status => card.status = STATUSES[index.min(STATUSES.len() - 1)].to_owned(),
         Field::Platform => card.platform = PLATFORMS[index.min(PLATFORMS.len() - 1)].to_owned(),
-        Field::Timer => card.timer = index == 0,
+        Field::Timer => {
+            card.timer = index < TIMER_MODES.len();
+            if card.timer {
+                card.timer_mode = TIMER_MODES[index].to_owned();
+            }
+        }
+        Field::RotationSeconds => card.rotation_seconds = ROTATIONS[index.min(ROTATIONS.len() - 1)],
         _ => {}
     }
 }
@@ -428,67 +538,6 @@ fn tidy(card: &mut Activity) {
     }
 }
 
-/// A one-line text box.
-#[derive(Default)]
-struct Input {
-    chars: Vec<char>,
-    cursor: usize,
-}
-
-impl Input {
-    fn set(&mut self, text: &str) {
-        self.chars = text.chars().collect();
-        self.cursor = self.chars.len();
-    }
-
-    fn value(&self) -> String {
-        self.chars.iter().collect()
-    }
-
-    fn insert(&mut self, ch: char) {
-        if !ch.is_control() {
-            self.chars.insert(self.cursor, ch);
-            self.cursor += 1;
-        }
-    }
-
-    fn paste(&mut self, text: &str) {
-        for ch in text.chars() {
-            match ch {
-                '\r' | '\n' => {}
-                '\t' => self.insert(' '),
-                other => self.insert(other),
-            }
-        }
-    }
-
-    /// Edits the box; `false` when the key is not an editing key.
-    fn edit(&mut self, key: &Key) -> bool {
-        match key {
-            Key::Char(ch) => self.insert(*ch),
-            Key::Paste(text) => self.paste(text),
-            Key::Backspace if self.cursor > 0 => {
-                self.cursor -= 1;
-                self.chars.remove(self.cursor);
-            }
-            Key::Delete if self.cursor < self.chars.len() => {
-                self.chars.remove(self.cursor);
-            }
-            Key::Left => self.cursor = self.cursor.saturating_sub(1),
-            Key::Right => self.cursor = (self.cursor + 1).min(self.chars.len()),
-            Key::Home => self.cursor = 0,
-            Key::End => self.cursor = self.chars.len(),
-            Key::Ctrl('u') => {
-                self.chars.clear();
-                self.cursor = 0;
-            }
-            Key::Backspace | Key::Delete => {}
-            _ => return false,
-        }
-        true
-    }
-}
-
 /// The wizard's state.
 struct Wizard {
     card: Activity,
@@ -503,6 +552,8 @@ struct Wizard {
     unchecked: Option<u64>,
     /// When the current question showed (for its entrance).
     since: Instant,
+    /// Tab through the application's pictures: what was typed, and the picture shown.
+    completion: Option<(String, usize)>,
 }
 
 impl Wizard {
@@ -524,7 +575,56 @@ impl Wizard {
             self.input.set(&text_of(&self.card, field));
         }
         self.error = None;
+        self.completion = None;
         self.since = Instant::now();
+        // The application's picture keys, fetched while the question is read.
+        let id = self.card.app_id;
+        if field.picture() && id != 0 && engine::known_application_assets(id).is_none() {
+            std::thread::spawn(move || {
+                let _ = engine::application_assets(id);
+            });
+        }
+    }
+
+    /// The application's pictures that match what was typed; `None` while they are unknown
+    /// (or when the answer is a link).
+    fn pictures(&self) -> Option<Vec<String>> {
+        if !self.field().picture() || self.card.app_id == 0 {
+            return None;
+        }
+        let all = engine::known_application_assets(self.card.app_id)?;
+        let typed = self
+            .completion
+            .as_ref()
+            .map_or_else(|| self.input.value(), |(typed, _)| typed.clone());
+        if typed.contains("://") {
+            return Some(Vec::new());
+        }
+        let typed = typed.trim().to_lowercase();
+        Some(
+            all.into_iter()
+                .filter(|name| name.to_lowercase().contains(&typed))
+                .collect(),
+        )
+    }
+
+    /// Tab: the next picture that matches what was typed; `false` when there is none.
+    fn complete(&mut self) -> bool {
+        let Some(found) = self.pictures().filter(|found| !found.is_empty()) else {
+            return false;
+        };
+        let typed = self
+            .completion
+            .as_ref()
+            .map_or_else(|| self.input.value(), |(typed, _)| typed.clone());
+        let next = match &self.completion {
+            Some((_, index)) => (index + 1) % found.len(),
+            None => 0,
+        };
+        self.input.set(&found[next]);
+        self.completion = Some((typed, next));
+        self.error = None;
+        true
     }
 
     /// Moves to the next question; `false` when there is none.
@@ -574,6 +674,7 @@ enum Row {
     Client,
     Refresh,
     Enabled,
+    AutoStart,
     Save,
     Cancel,
 }
@@ -590,6 +691,7 @@ fn rows(draft: &Settings) -> Vec<Row> {
         Row::Client,
         Row::Refresh,
         Row::Enabled,
+        Row::AutoStart,
         Row::Save,
         Row::Cancel,
     ]);
@@ -661,6 +763,7 @@ impl App {
                             draft.refresh_seconds = REFRESHES[cycle(index, REFRESHES.len(), step)];
                         }
                         Row::Enabled => draft.enabled = !draft.enabled,
+                        Row::AutoStart => draft.auto_start = !draft.auto_start,
                         _ => {}
                     }
                 }
@@ -689,6 +792,7 @@ impl App {
                         }
                     }
                     Row::Enabled => draft.enabled = !draft.enabled,
+                    Row::AutoStart => draft.auto_start = !draft.auto_start,
                     Row::Transport | Row::Client | Row::Refresh => {}
                     Row::Save => {
                         self.save(draft);
@@ -833,6 +937,15 @@ impl App {
                     };
                     value(canvas, word, hint);
                 }
+                Row::AutoStart => {
+                    canvas.text(x + 2, y, "Au démarrage", strong);
+                    let (word, hint) = if draft.auto_start {
+                        ("Lancer la présence", "Spider publie dès qu'il s'ouvre")
+                    } else {
+                        ("Menu", "Spider attend que tu choisisses")
+                    };
+                    value(canvas, word, hint);
+                }
                 Row::Save => {
                     let colour = if chosen { ink::GOOD } else { ink::MUTED };
                     canvas.text(x + 2, y, "Enregistrer", Style::fg(colour).bold());
@@ -872,7 +985,9 @@ impl App {
                     hints.push(("Suppr", "retirer"));
                 }
             }
-            Row::Transport | Row::Client | Row::Refresh | Row::Enabled => hints.push(("←→", "changer")),
+            Row::Transport | Row::Client | Row::Refresh | Row::Enabled | Row::AutoStart => {
+                hints.push(("←→", "changer"))
+            }
             _ => hints.push(("Entrée", "valider")),
         }
         hints.push(("Ctrl+S", "enregistrer"));
@@ -902,6 +1017,7 @@ impl App {
             note: None,
             unchecked: None,
             since: Instant::now(),
+            completion: None,
         };
         if !Field::Template.shown(&wizard.card, new_card) {
             wizard.forward();
@@ -954,6 +1070,10 @@ impl App {
                 }
                 continue;
             }
+            // Tab completes a picture key when the application has some.
+            if key == Key::Tab && wizard.complete() {
+                continue;
+            }
             match key {
                 Key::Enter | Key::Down | Key::Tab => {
                     let value = wizard.input.value().trim().to_owned();
@@ -976,6 +1096,7 @@ impl App {
                 other => {
                     if wizard.input.edit(&other) {
                         wizard.error = None;
+                        wizard.completion = None;
                     }
                 }
             }
@@ -1105,6 +1226,9 @@ impl App {
             let count = format!("{}/{}", wizard.input.chars.len(), field.max());
             canvas.text(x + room - width(&count), y + 2, &count, Style::fg(ink::FAINT));
             cursor = (!checking).then_some((x + 2 + (wizard.input.cursor - start) as i32, y));
+            if field.picture() && wizard.card.app_id != 0 {
+                self.draw_pictures(canvas, wizard, x, y + 2, room - width(&count) - 2);
+            }
             y += 4;
         }
         if checking {
@@ -1126,10 +1250,56 @@ impl App {
         let hints: Vec<(&str, &str)> = if field.choices().is_some() {
             vec![("↑↓", "choisir"), ("Entrée", "valider"), ("Échap", "retour")]
         } else {
-            vec![("Entrée", "valider"), ("Échap", "retour"), ("Ctrl+V", "coller"), ("Ctrl+U", "effacer")]
+            let mut hints = vec![("Entrée", "valider"), ("Échap", "retour")];
+            if field.picture() {
+                hints.push(("Tab", "images de l'app"));
+            }
+            hints.extend([("Ctrl+V", "coller"), ("Ctrl+U", "effacer")]);
+            hints
         };
         logo::footer(canvas, &hints);
         cursor
+    }
+}
+
+impl App {
+    /// The application's picture keys under the box: the ones matching what is typed, the one
+    /// Tab put in the box lit.
+    fn draw_pictures(&self, canvas: &mut Canvas, wizard: &Wizard, x: i32, y: i32, room: i32) {
+        let Some(found) = wizard.pictures() else {
+            canvas.text(x + 2, y, "Recherche des images de l'application…", Style::fg(ink::FAINT));
+            return;
+        };
+        let all = engine::known_application_assets(wizard.card.app_id).unwrap_or_default();
+        if all.is_empty() {
+            canvas.text(
+                x + 2,
+                y,
+                &clip("Pas d'image dans cette application : colle un lien https://", room - 2),
+                Style::fg(ink::FAINT),
+            );
+            return;
+        }
+        if found.is_empty() {
+            canvas.text(x + 2, y, "Aucune image ne correspond", Style::fg(ink::FAINT));
+            return;
+        }
+        let mut column = canvas.text(x + 2, y, "Tab ", Style::fg(ink::TEXT).bold());
+        let chosen = wizard.completion.as_ref().map(|(_, index)| *index);
+        // Start the list a little before the chosen picture so it stays in view.
+        let first = chosen.map_or(0, |index| index.saturating_sub(2));
+        for (index, name) in found.iter().enumerate().skip(first) {
+            if column + width(name) + 2 > x + room {
+                canvas.text(column, y, "…", Style::fg(ink::FAINT));
+                break;
+            }
+            let style = if Some(index) == chosen {
+                Style::fg(self.theme.accent()).bold()
+            } else {
+                Style::fg(ink::MUTED)
+            };
+            column = canvas.text(column, y, name, style) + 2;
+        }
     }
 }
 

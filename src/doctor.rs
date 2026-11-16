@@ -163,6 +163,38 @@ pub fn check(path: &Path) -> Vec<Section> {
         lines,
     });
 
+    // The background mode.
+    let mut lines = Vec::new();
+    match crate::background::executable() {
+        None => lines.push(line(
+            Level::Warn,
+            "Arrière-plan",
+            "SpiderBackground.exe est introuvable à côté de Spider.exe (relance build.bat)",
+        )),
+        Some(_) => {
+            lines.push(if crate::background::running() {
+                line(Level::Good, "Arrière-plan", "en marche : il publie les cartes sans fenêtre")
+            } else {
+                line(Level::Off, "Arrière-plan", "arrêté")
+            });
+            lines.push(match crate::background::autostart() {
+                Some(_) if crate::background::autostart_here() => {
+                    line(Level::Good, "Avec Windows", "Spider se lance en arrière-plan à la connexion")
+                }
+                Some(other) => line(
+                    Level::Warn,
+                    "Avec Windows",
+                    format!("Windows lance une autre copie : {other}"),
+                ),
+                None => line(Level::Off, "Avec Windows", "non"),
+            });
+        }
+    }
+    sections.push(Section {
+        title: "Arrière-plan",
+        lines,
+    });
+
     // The file.
     let mut lines = Vec::new();
     let name = path

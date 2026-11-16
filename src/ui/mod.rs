@@ -2,6 +2,8 @@
 //! dashboard and the diagnostic.
 
 mod app;
+mod extra;
+mod input;
 pub mod logo;
 pub mod paint;
 mod preview;

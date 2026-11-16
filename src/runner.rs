@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use crate::config::{self, Settings};
+use crate::config::Settings;
 use crate::engine::{self, Client, Transport};
 
 /// Set while cards are on the profile: closing the console clears them then.
@@ -52,6 +52,8 @@ pub struct Card {
     pub platform: Option<&'static str>,
     pub buttons: Vec<String>,
     pub timer: bool,
+    pub timer_mode: engine::TimerMode,
+    pub party: Option<(u32, u32)>,
 }
 
 /// Everything the window shows about the loop.
@@ -92,6 +94,8 @@ pub struct Runner {
     settings: Option<Settings>,
     stamp: Stamp,
     signature: String,
+    /// The cards' applications, types, consoles and slots at the last push.
+    shape: String,
     /// The transport setting of the last push: a change is a hand-over.
     mode: Option<engine::Mode>,
     transport: Option<Transport>,
@@ -114,6 +118,7 @@ impl Runner {
             settings: None,
             stamp: Stamp::none(),
             signature: String::new(),
+            shape: String::new(),
             mode: None,
             transport: None,
             applied: false,
@@ -175,20 +180,28 @@ impl Runner {
             .map(engine::Config::signature)
             .collect::<Vec<_>>()
             .join(";");
+        let shape = cards
+            .iter()
+            .map(engine::Config::shape)
+            .collect::<Vec<_>>()
+            .join(";");
         // A save that only touched the window's theme or the refresh changes nothing here:
-        // only the cards and the transport make a new push (and a hand-over).
-        let changed = next != self.signature || self.mode != Some(mode);
+        // only the cards and the transport make a new push.
+        let reshaped = shape != self.shape || self.mode != Some(mode);
+        let changed = next != self.signature || reshaped;
         let due = self.pushed_at.is_none_or(|at| at.elapsed() >= wait);
         if (changed || due || self.force) && !CLOSING.load(Ordering::SeqCst) {
             self.force = false;
             self.signature = next;
+            self.shape = shape;
             self.mode = Some(mode);
             self.pushed_at = Some(Instant::now());
-            // The transport that worked stays first; a change of the cards while others are on
-            // the profile clears them first, so the old type (Playing next to Streaming) cannot
-            // stay behind. A plain refresh just sends the same cards again.
+            // The transport that worked stays first. A new application, type, console, slot or
+            // transport clears the cards on the profile first, so the old type (Playing next
+            // to Streaming) cannot stay behind. A new text (a rotation, `{heure}`) or a plain
+            // refresh just sends the cards again: the card never blinks.
             let previous = if self.applied { self.transport } else { None };
-            let handover = self.applied && changed;
+            let handover = self.applied && reshaped;
             match engine::publish(&cards, mode, previous, handover) {
                 Ok(used) => {
                     if !self.applied || self.transport != Some(used) {
@@ -298,43 +311,30 @@ impl Runner {
     }
 
     pub fn snapshot(&self) -> Snapshot {
+        // The cards as they read right now: the rotation and `{heure}` applied, the console badge
+        // added, exactly what goes to Discord.
         let cards = self
             .settings
             .as_ref()
-            .map(|settings| {
-                settings
-                    .activities
-                    .iter()
-                    .enumerate()
-                    .map(|(index, activity)| Card {
-                        slot: if activity.slot == 0 {
-                            index as u8 + 1
-                        } else {
-                            activity.slot
-                        },
-                        kind: config::kind(&activity.status),
-                        name: activity.name.clone(),
-                        details: activity.details.clone(),
-                        state: activity.state.clone(),
-                        app_id: activity.app_id,
-                        image: !activity.image.trim().is_empty(),
-                        small_image: !activity.small_image.trim().is_empty()
-                            || config::platform(&activity.platform).is_some(),
-                        platform: config::platform(&activity.platform),
-                        buttons: activity
-                            .buttons
-                            .iter()
-                            .filter(|button| {
-                                !button.label.trim().is_empty() && config::is_url(&button.url)
-                            })
-                            .map(|button| button.label.clone())
-                            .take(2)
-                            .collect(),
-                        timer: activity.timer,
-                    })
-                    .collect()
+            .and_then(|settings| settings.activities().ok())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|card| Card {
+                slot: card.slot,
+                kind: card.kind,
+                name: card.name,
+                details: card.details,
+                state: card.state,
+                app_id: card.app_id,
+                image: !card.image.trim().is_empty(),
+                small_image: !card.small_image.trim().is_empty(),
+                platform: card.platform,
+                buttons: card.buttons.into_iter().map(|(label, _)| label).collect(),
+                timer: card.timer,
+                timer_mode: card.timer_mode,
+                party: card.party,
             })
-            .unwrap_or_default();
+            .collect();
         let phase = match &self.settings {
             None => Phase::Waiting,
             Some(settings) if !settings.enabled => Phase::Disabled,
@@ -408,53 +408,6 @@ pub fn clear_on_close() {
     }
 }
 
-/// The local time as `HH:MM:SS`.
-pub fn clock() -> String {
-    #[cfg(windows)]
-    {
-        #[repr(C)]
-        struct SystemTime {
-            year: u16,
-            month: u16,
-            weekday: u16,
-            day: u16,
-            hour: u16,
-            minute: u16,
-            second: u16,
-            millis: u16,
-        }
-        #[link(name = "kernel32")]
-        unsafe extern "system" {
-            fn GetLocalTime(time: *mut SystemTime);
-        }
-        let mut now = SystemTime {
-            year: 0,
-            month: 0,
-            weekday: 0,
-            day: 0,
-            hour: 0,
-            minute: 0,
-            second: 0,
-            millis: 0,
-        };
-        // SAFETY: GetLocalTime only fills the structure it is given.
-        unsafe { GetLocalTime(&mut now) };
-        format!("{:02}:{:02}:{:02}", now.hour, now.minute, now.second)
-    }
-    #[cfg(not(windows))]
-    {
-        let seconds = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |elapsed| elapsed.as_secs());
-        format!(
-            "{:02}:{:02}:{:02}",
-            seconds / 3600 % 24,
-            seconds / 60 % 60,
-            seconds % 60
-        )
-    }
-}
-
 /// The log beside the config: the local time, no repeated line, and the last lines kept for
 /// the window.
 pub struct Log {
@@ -480,7 +433,7 @@ impl Log {
             return;
         }
         self.last = Some(text.to_owned());
-        let line = format!("[{}] {text}", clock());
+        let line = format!("[{}] {text}", crate::clock::clock());
         if self.echo {
             println!("{line}");
         }

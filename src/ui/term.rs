@@ -43,6 +43,8 @@ pub struct Term {
     pub w: u16,
     pub h: u16,
     open: bool,
+    /// The window's title right now.
+    titled: String,
 }
 
 impl Term {
@@ -71,6 +73,7 @@ impl Term {
             w,
             h,
             open: true,
+            titled: title.to_owned(),
         })
     }
 
@@ -101,6 +104,14 @@ impl Term {
         }
         self.out.write_all(out.as_bytes())?;
         self.out.flush()
+    }
+
+    /// Sets the window's title (shown in the taskbar), only when it changes.
+    pub fn title(&mut self, title: &str) {
+        if self.titled != title {
+            self.titled = title.to_owned();
+            let _ = execute!(self.out, terminal::SetTitle(title));
+        }
     }
 
     /// Forgets what is on screen, so the next frame is drawn whole.

@@ -9,7 +9,8 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::engine::{Client, Config, Mode};
+use crate::clock::{self, Local};
+use crate::engine::{Client, Config, Mode, TimerMode};
 
 /// The whole file.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -29,6 +30,8 @@ pub struct Settings {
     pub retry_seconds: f64,
     /// The colours of Spider's window (`venom`, `blood`, `ocean`, `toxic`, `sunset`, `ghost`).
     pub theme: String,
+    /// Opening Spider starts the presence at once (no menu first).
+    pub auto_start: bool,
     /// One to three cards, in slot order.
     pub activities: Vec<Activity>,
 }
@@ -42,6 +45,7 @@ impl Default for Settings {
             refresh_seconds: 15.0,
             retry_seconds: 5.0,
             theme: "venom".to_owned(),
+            auto_start: false,
             activities: Vec::new(),
         }
     }
@@ -82,8 +86,19 @@ pub struct Activity {
     pub stream_url: String,
     /// Up to two buttons (`label` + `https://` URL).
     pub buttons: Vec<Button>,
-    /// Show the elapsed time.
+    /// Show a timer.
     pub timer: bool,
+    /// What the timer shows: `start` (since the card appeared), `clock` (the time of day) or
+    /// `countdown` (`countdown_minutes` going down, then again).
+    pub timer_mode: String,
+    pub countdown_minutes: u32,
+    /// `[2, 4]` shows "(2 of 4)" after the second line; empty = none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub party: Vec<u32>,
+    /// Other first lines, shown in turn with `details`, each for `rotation_seconds`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub rotation: Vec<String>,
+    pub rotation_seconds: u32,
 }
 
 impl Default for Activity {
@@ -104,6 +119,11 @@ impl Default for Activity {
             stream_url: String::new(),
             buttons: Vec::new(),
             timer: true,
+            timer_mode: "start".to_owned(),
+            countdown_minutes: 30,
+            party: Vec::new(),
+            rotation: Vec::new(),
+            rotation_seconds: 30,
         }
     }
 }
@@ -116,6 +136,15 @@ pub struct Button {
     pub url: String,
 }
 
+/// `spider.json` beside the executable: a double-click, a shortcut and the background build all
+/// find the same file.
+pub fn default_path() -> std::path::PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|folder| folder.join("spider.json")))
+        .unwrap_or_else(|| std::path::PathBuf::from("spider.json"))
+}
+
 /// The activity types, as `spider.json` spells them, in the order the window offers them.
 pub const STATUSES: [&str; 5] = ["playing", "streaming", "listening", "watching", "competing"];
 
@@ -124,6 +153,54 @@ pub const PLATFORMS: [&str; 4] = ["", "xbox", "ps5", "meta_quest"];
 
 /// The transports, in the order the window offers them.
 pub const TRANSPORTS: [&str; 3] = ["auto", "cdp", "rpc"];
+
+/// The timer modes, in the order the window offers them.
+pub const TIMER_MODES: [&str; 3] = ["start", "clock", "countdown"];
+
+/// Discord updates a card at most every 15 seconds: a faster rotation would be dropped.
+pub const ROTATION_MIN: u32 = 15;
+
+/// The words a text may hold, replaced when the card is sent: `{heure}`, `{date}`, `{jour}`.
+pub fn expand(text: &str, now: &Local) -> String {
+    if !text.contains('{') {
+        return text.to_owned();
+    }
+    text.replace("{heure}", &now.hour_minute())
+        .replace("{date}", &now.date())
+        .replace("{jour}", now.weekday_name())
+}
+
+impl Activity {
+    /// The first line shown at `epoch_seconds`: `details` and the `rotation` lines in turn.
+    pub fn details_at(&self, epoch_seconds: u64) -> &str {
+        let lines: Vec<&str> = std::iter::once(self.details.as_str())
+            .chain(self.rotation.iter().map(String::as_str))
+            .filter(|line| !line.trim().is_empty())
+            .collect();
+        if lines.len() < 2 {
+            return &self.details;
+        }
+        let every = u64::from(self.rotation_seconds.max(ROTATION_MIN));
+        lines[(epoch_seconds / every % lines.len() as u64) as usize]
+    }
+
+    /// The timer, as the engine counts it.
+    pub fn timer_mode(&self) -> TimerMode {
+        match self.timer_mode.trim().to_ascii_lowercase().as_str() {
+            "clock" | "heure" => TimerMode::Clock,
+            "countdown" | "rebours" => TimerMode::Countdown(self.countdown_minutes.clamp(1, 1440)),
+            _ => TimerMode::Start,
+        }
+    }
+
+    /// The group size, when it makes sense: at least one, and no more than the maximum.
+    pub fn party_size(&self) -> Option<(u32, u32)> {
+        match self.party[..] {
+            [size, max] if size >= 1 && max >= size => Some((size, max)),
+            _ => None,
+        }
+    }
+}
 
 impl Settings {
     /// Reads and checks the file.
@@ -169,8 +246,14 @@ impl Settings {
         std::time::Duration::from_secs_f64(self.retry_seconds.max(1.0))
     }
 
-    /// The cards, ready for the engine. Fails on a file that would publish nothing useful.
+    /// The cards, ready for the engine, as they read now. Fails on a file that would publish
+    /// nothing useful.
     pub fn activities(&self) -> Result<Vec<Config>, String> {
+        self.activities_at(&clock::now(), clock::epoch_ms() / 1000)
+    }
+
+    /// The cards as they read at a given moment (rotation, `{heure}`, `{date}`, `{jour}`).
+    pub fn activities_at(&self, now: &Local, epoch_seconds: u64) -> Result<Vec<Config>, String> {
         if self.activities.is_empty() {
             return Err("aucune carte : remplis la liste \"activities\"".to_owned());
         }
@@ -201,18 +284,20 @@ impl Settings {
                 app_id: activity.app_id,
                 slot,
                 image_signer: activity.image_signer,
-                name: activity.name.clone(),
-                details: activity.details.clone(),
-                state: activity.state.clone(),
+                name: expand(&activity.name, now),
+                details: expand(activity.details_at(epoch_seconds), now),
+                state: expand(&activity.state, now),
                 image: activity.image.clone(),
-                image_text: activity.image_text.clone(),
+                image_text: expand(&activity.image_text, now),
                 small_image,
-                small_text,
+                small_text: expand(&small_text, now),
                 kind: kind(&activity.status),
                 platform: console,
                 stream_url: activity.stream_url.clone(),
                 buttons: buttons(activity),
                 timer: activity.timer,
+                timer_mode: activity.timer_mode(),
+                party: activity.party_size(),
             });
         }
         Ok(cards)
@@ -232,6 +317,16 @@ impl Settings {
             if mode == Mode::Rpc && platform(&activity.platform).is_some() {
                 list.push(format!(
                     "carte {number} : par le pipe, la console n'apparaît qu'en pastille sur l'image"
+                ));
+            }
+            if !activity.party.is_empty() && activity.party_size().is_none() {
+                list.push(format!(
+                    "carte {number} : le groupe s'écrit [taille, maximum], par exemple [2, 4]"
+                ));
+            }
+            if !activity.rotation.is_empty() && activity.rotation_seconds < ROTATION_MIN {
+                list.push(format!(
+                    "carte {number} : Discord ne change une carte que toutes les 15 secondes"
                 ));
             }
             let dropped = activity
@@ -477,6 +572,41 @@ mod tests {
         assert_eq!(cards[0].small_text, "Xbox");
         assert_eq!(cards[1].small_image, "mine");
         assert_eq!(cards[1].small_text, "Mine");
+    }
+
+    #[test]
+    fn rotation_placeholders_timer_modes_and_groups_reach_the_cards() {
+        let settings = parse(
+            r#"{"activities":[{"app_id":1,"details":"Je code ({heure})","state":"On est {jour} {date}",
+                "rotation":["Je teste","",
+                "Je dors"],"rotation_seconds":30,
+                "timer_mode":"countdown","countdown_minutes":5,"party":[2,4]}]}"#,
+        )
+        .unwrap();
+        let now = Local {
+            year: 2026,
+            month: 11,
+            day: 16,
+            weekday: 1,
+            hour: 21,
+            minute: 7,
+            second: 0,
+            millis: 0,
+        };
+        let at = |seconds: u64| settings.activities_at(&now, seconds).unwrap().remove(0);
+        // Three non-empty lines, 30 s each, in turn.
+        assert_eq!(at(0).details, "Je code (21:07)");
+        assert_eq!(at(30).details, "Je teste");
+        assert_eq!(at(65).details, "Je dors");
+        assert_eq!(at(90).details, "Je code (21:07)");
+        let card = at(0);
+        assert_eq!(card.state, "On est lundi 16/11/2026");
+        assert_eq!(card.timer_mode, TimerMode::Countdown(5));
+        assert_eq!(card.party, Some((2, 4)));
+        // A group bigger than its maximum is left out, and said.
+        let wrong = parse(r#"{"activities":[{"app_id":1,"party":[5,4]}]}"#).unwrap();
+        assert_eq!(wrong.activities().unwrap()[0].party, None);
+        assert_eq!(wrong.warnings().len(), 1);
     }
 
     #[test]

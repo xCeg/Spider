@@ -1,6 +1,32 @@
 //! A Discord activity card drawn in characters: roughly what the profile will show.
 
 use super::paint::{Canvas, Style, Theme, clip, ink, width};
+use crate::engine::TimerMode;
+
+/// What a card's timer shows right now.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum Timer {
+    /// Seconds since the card appeared.
+    Elapsed(u64),
+    /// Seconds left on a countdown.
+    Left(u64),
+    /// Seconds since midnight: the time of day.
+    Time(u64),
+}
+
+impl Timer {
+    /// The timer of a card in `mode`, `since` seconds after it appeared.
+    pub(super) fn of(mode: TimerMode, since: u64) -> Timer {
+        match mode {
+            TimerMode::Start => Timer::Elapsed(since),
+            TimerMode::Clock => Timer::Time(crate::clock::now().since_midnight_ms() / 1000),
+            TimerMode::Countdown(minutes) => {
+                let span = u64::from(minutes.max(1)) * 60;
+                Timer::Left(span - since % span)
+            }
+        }
+    }
+}
 
 /// What a card shows.
 pub(super) struct CardView {
@@ -12,8 +38,10 @@ pub(super) struct CardView {
     pub small_image: bool,
     pub platform: Option<&'static str>,
     pub buttons: Vec<String>,
-    /// The seconds on the clock, `None` without a timer.
-    pub elapsed: Option<u64>,
+    /// "(2 of 4)".
+    pub party: Option<(u32, u32)>,
+    /// `None` without a timer.
+    pub timer: Option<Timer>,
 }
 
 pub(super) const WIDTH: i32 = 38;
@@ -89,14 +117,24 @@ pub(super) fn draw(canvas: &mut Canvas, x: i32, y: i32, card: &CardView, theme: 
     let mut line = y + 3;
     canvas.text(left, line, &clip(&card.title, room), Style::fg(ink::TEXT).bold());
     line += 1;
-    for (text, colour) in [(&card.details, ink::TEXT), (&card.state, ink::MUTED)] {
-        if !text.trim().is_empty() {
-            canvas.text(left, line, &clip(text.trim(), room), Style::fg(colour));
-            line += 1;
-        }
+    if !card.details.trim().is_empty() {
+        canvas.text(left, line, &clip(card.details.trim(), room), Style::fg(ink::TEXT));
+        line += 1;
     }
-    if let Some(seconds) = card.elapsed {
-        if card.kind == 2 {
+    // Discord writes the group after the second line: "Ranked (2 of 4)".
+    let mut state = card.state.trim().to_owned();
+    if let Some((size, max)) = card.party {
+        if !state.is_empty() {
+            state.push(' ');
+        }
+        state.push_str(&format!("({size} sur {max})"));
+    }
+    if !state.is_empty() {
+        canvas.text(left, line, &clip(&state, room), Style::fg(ink::MUTED));
+        line += 1;
+    }
+    match card.timer {
+        Some(Timer::Elapsed(seconds)) if card.kind == 2 => {
             // A listening card shows a playback bar (four minutes, then it starts over).
             let at = seconds % 240;
             let bar = room - 10;
@@ -107,14 +145,14 @@ pub(super) fn draw(canvas: &mut Canvas, x: i32, y: i32, card: &CardView, theme: 
                 canvas.put(after + 1 + i, line, '─', Style::fg(colour));
             }
             canvas.text(after + 2 + bar, line, "4:00", Style::fg(ink::MUTED));
-        } else {
-            canvas.text(
-                left,
-                line,
-                &format!("{} écoulées", clock(seconds)),
-                Style::fg(ink::GOOD),
-            );
         }
+        Some(Timer::Elapsed(seconds) | Timer::Time(seconds)) => {
+            canvas.text(left, line, &format!("{} écoulées", clock(seconds)), Style::fg(ink::GOOD));
+        }
+        Some(Timer::Left(seconds)) => {
+            canvas.text(left, line, &format!("{} restantes", clock(seconds)), Style::fg(ink::GOOD));
+        }
+        None => {}
     }
     let mut row = y + 8;
     for label in &card.buttons {

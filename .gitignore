@@ -3,3 +3,5 @@
 *.json.tmp
 spider.json
 Spider.exe
+SpiderBackground.exe
+/profiles

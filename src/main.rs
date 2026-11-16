@@ -46,7 +46,7 @@ fn cli() -> i32 {
             other => command = Some(other.to_owned()),
         }
     }
-    let path = config.unwrap_or_else(default_config);
+    let path = config.unwrap_or_else(spider::config::default_path);
     runner::clear_on_close();
     match command.as_deref() {
         None if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() => {
@@ -70,14 +70,6 @@ fn cli() -> i32 {
             2
         }
     }
-}
-
-/// `spider.json` beside the executable: a double-click and a shortcut find the same file.
-fn default_config() -> PathBuf {
-    std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|folder| folder.join("spider.json")))
-        .unwrap_or_else(|| PathBuf::from("spider.json"))
 }
 
 /// Whether colour codes reach a console that understands them.

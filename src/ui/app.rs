@@ -18,6 +18,7 @@ use crate::config::Settings;
 use crate::doctor::{self, Level};
 use crate::engine::{self, Client, PipeInfo};
 use crate::runner::{self, Command, Phase, Snapshot, Worker};
+use crate::{background, profiles};
 
 /// One frame while something moves (about 60 a second).
 pub(super) const FRAME: Duration = Duration::from_millis(16);
@@ -64,9 +65,11 @@ enum Item {
     Start,
     Dashboard,
     Configure,
+    Profiles,
     Stop,
     Clear,
     Doctor,
+    Background,
     Theme,
     Restart,
     Quit,
@@ -177,6 +180,13 @@ impl App {
         if self.menu_since.is_none() {
             self.menu_since = Some(Instant::now());
         }
+        // "At start-up: start the presence" goes straight to the dashboard.
+        if self.settings.as_ref().is_some_and(|settings| settings.auto_start)
+            && self.worker.is_none()
+            && !background::running()
+        {
+            self.start()?;
+        }
         loop {
             let item = self.menu()?;
             match item {
@@ -184,6 +194,12 @@ impl App {
                 Item::Start => self.start()?,
                 Item::Dashboard => self.dashboard()?,
                 Item::Configure => self.configure()?,
+                Item::Profiles => self.profiles()?,
+                Item::Background => {
+                    if self.background()? {
+                        return Ok(());
+                    }
+                }
                 Item::Stop => self.stop_presence()?,
                 Item::Clear => {
                     match self.busy("Retrait", "Retrait des cartes de ton profil…", engine::clear_all)? {
@@ -246,7 +262,7 @@ impl App {
             let k = start.elapsed().as_secs_f32() / 0.6;
             let mut canvas = self.term.canvas();
             if self.big(&canvas) {
-                let below = 2 + 1 + 2 + 7 + 2;
+                let below = 2 + 1 + 2 + self.items().len() as i32 + 2;
                 let top = self.hero_top(&canvas, below);
                 logo::hero(&mut canvas, top, self.theme, logo::INTRO * (1.0 - k).max(0.0), None);
             }
@@ -311,8 +327,14 @@ impl App {
     fn items(&self) -> Vec<(Item, &'static str, String)> {
         let mut list = Vec::new();
         let live = self.worker.as_ref().map(|worker| worker.view().0);
+        let behind = live.is_none() && background::running();
         match &live {
             Some(snapshot) => list.push((Item::Dashboard, "Tableau de bord", live_summary(snapshot))),
+            None if behind => list.push((
+                Item::Start,
+                "Reprendre la présence ici",
+                "elle tourne en arrière-plan, sans fenêtre".to_owned(),
+            )),
             None => list.push((
                 Item::Start,
                 "Lancer la présence",
@@ -329,6 +351,16 @@ impl App {
             }
             .to_owned(),
         ));
+        let count = profiles::list(&self.path).len();
+        list.push((
+            Item::Profiles,
+            "Profils",
+            match count {
+                0 => "enregistrer et recharger des configurations".to_owned(),
+                1 => "1 profil enregistré".to_owned(),
+                count => format!("{count} profils enregistrés"),
+            },
+        ));
         if live.is_some() {
             list.push((Item::Stop, "Arrêter la présence", "retire les cartes de ton profil".to_owned()));
         } else {
@@ -343,6 +375,15 @@ impl App {
             "Diagnostic",
             "Discord, comptes, port de debug, test réel".to_owned(),
         ));
+        list.push((
+            Item::Background,
+            "Arrière-plan",
+            format!(
+                "{} · avec Windows : {}",
+                if background::running() { "en marche" } else { "sans fenêtre" },
+                if background::autostart_here() { "oui" } else { "non" }
+            ),
+        ));
         list.push((Item::Theme, "Thème", format!("{} · change les couleurs", self.theme.name)));
         list.push((
             Item::Restart,
@@ -354,6 +395,8 @@ impl App {
             "Quitter",
             if live.is_some() {
                 "retire les cartes et ferme Spider"
+            } else if behind {
+                "l'arrière-plan continue"
             } else {
                 "à la prochaine"
             }
@@ -362,8 +405,23 @@ impl App {
         list
     }
 
+    /// The window's title says how the presence is doing (it shows in the taskbar).
+    fn retitle(&mut self) {
+        let title = match self.worker.as_ref().map(|worker| worker.view().0.phase) {
+            Some(Phase::Live) => "Spider · en ligne",
+            Some(Phase::Failing) => "Spider · échec",
+            Some(Phase::Paused) => "Spider · en pause",
+            Some(Phase::Disabled) => "Spider · désactivé",
+            Some(Phase::Waiting | Phase::Connecting) => "Spider · connexion…",
+            None if background::running() => "Spider · arrière-plan",
+            None => "Spider",
+        };
+        self.term.title(title);
+    }
+
     fn menu(&mut self) -> io::Result<Item> {
         loop {
+            self.retitle();
             let items = self.items();
             self.selected = self.selected.min(items.len() - 1);
             let seconds = self.born.elapsed().as_secs_f32();
@@ -444,7 +502,7 @@ impl App {
         self.draw_notice(canvas, y);
         logo::footer(
             canvas,
-            &[("↑↓", "choisir"), ("Entrée", "valider"), ("1-7", "raccourcis"), ("Échap", "quitter")],
+            &[("↑↓", "choisir"), ("Entrée", "valider"), ("1-9", "raccourcis"), ("Échap", "quitter")],
         );
     }
 
@@ -466,6 +524,9 @@ impl App {
     fn status(&self) -> Vec<(Rgb, String)> {
         let probe = self.probe.lock().map(|probe| probe.clone()).unwrap_or_default();
         let mut list = Vec::new();
+        if self.worker.is_none() && background::running() {
+            list.push((ink::GOOD, "Arrière-plan actif".to_owned()));
+        }
         if let Some(worker) = &self.worker {
             let (snapshot, _, _) = worker.view();
             list.push(match snapshot.phase {
@@ -608,6 +669,22 @@ impl App {
             self.say(Tone::Warn, "Configure d'abord ta carte");
             return self.configure();
         }
+        // One publisher at a time: two would fight over the same cards.
+        if self.worker.is_none() && background::running() {
+            let back = self.confirm(
+                "Arrière-plan",
+                &["La présence tourne en arrière-plan.", "L'arrêter et la reprendre dans cette fenêtre ?"],
+                "Reprendre ici",
+                "Laisser",
+            )?;
+            if !back {
+                return Ok(());
+            }
+            if let Err(error) = self.busy("Arrière-plan", "Arrêt du mode arrière-plan…", background::stop)? {
+                self.say(Tone::Bad, error);
+                return Ok(());
+            }
+        }
         if self.worker.is_none() {
             self.worker = Some(Worker::start(&self.path));
         }
@@ -625,6 +702,7 @@ impl App {
 
     fn dashboard(&mut self) -> io::Result<()> {
         loop {
+            self.retitle();
             let Some((snapshot, log, _)) = self.worker.as_ref().map(Worker::view) else {
                 return Ok(());
             };
@@ -727,9 +805,11 @@ impl App {
                 small_image: card.small_image,
                 platform: card.platform,
                 buttons: card.buttons.clone(),
-                elapsed: card
-                    .timer
-                    .then(|| snapshot.live_since.map_or(0, |since| since.elapsed().as_secs())),
+                party: card.party,
+                timer: card.timer.then(|| {
+                    let since = snapshot.live_since.map_or(0, |since| since.elapsed().as_secs());
+                    preview::Timer::of(card.timer_mode, since)
+                }),
             })
             .collect();
         let across = ((canvas.w - 6) / (preview::WIDTH + 2)).max(1) as usize;
@@ -1087,7 +1167,10 @@ pub(super) fn view_of(activity: &crate::config::Activity) -> CardView {
             .map(|button| button.label.clone())
             .take(2)
             .collect(),
-        elapsed: activity.timer.then_some(0),
+        party: activity.party_size(),
+        timer: activity
+            .timer
+            .then(|| preview::Timer::of(activity.timer_mode(), 0)),
     }
 }
 

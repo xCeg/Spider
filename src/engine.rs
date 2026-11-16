@@ -282,6 +282,22 @@ pub struct Config {
     pub stream_url: String,
     pub buttons: Vec<(String, String)>,
     pub timer: bool,
+    /// What the timer counts, when `timer` is on.
+    pub timer_mode: TimerMode,
+    /// "(2 of 4)" after the second line: the group's size and its maximum.
+    pub party: Option<(u32, u32)>,
+}
+
+/// What a card's timer shows.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum TimerMode {
+    /// The time since the card appeared ("12:34 elapsed").
+    #[default]
+    Start,
+    /// The time of day: the timer starts at local midnight.
+    Clock,
+    /// A countdown of this many minutes ("12:34 left"), starting over when it ends.
+    Countdown(u32),
 }
 
 impl Config {
@@ -291,7 +307,7 @@ impl Config {
     /// its `timestamps` (otherwise Discord keeps the old start time forever).
     pub fn signature(&self) -> String {
         format!(
-            "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+            "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{:?}|{:?}|{}",
             self.slot,
             self.app_id,
             self.image_signer,
@@ -306,11 +322,26 @@ impl Config {
             self.platform.unwrap_or_default(),
             self.stream_url,
             self.timer,
+            self.timer_mode,
+            self.party,
             self.buttons
                 .iter()
                 .map(|(label, url)| format!("{label}>{url}"))
                 .collect::<Vec<_>>()
                 .join(",")
+        )
+    }
+
+    /// What makes the card a different activity for Discord: its slot, application, type and
+    /// console. Changing one of them needs the old card cleared first (the renderer keys an
+    /// activity by type); changing a text or a picture is a plain update of the same card.
+    pub fn shape(&self) -> String {
+        format!(
+            "{}|{}|{}|{}",
+            self.slot,
+            self.app_id,
+            self.kind,
+            self.platform.unwrap_or_default()
         )
     }
 }
@@ -765,6 +796,67 @@ fn remember_account(pid: u32, client: Client, user: &str) {
     }
 }
 
+/// The picture keys (Art Assets) of the applications already looked up this session.
+static ASSETS: Mutex<Option<HashMap<u64, Vec<String>>>> = Mutex::new(None);
+
+/// An application's picture keys when they were already fetched; never waits.
+pub fn known_application_assets(app_id: u64) -> Option<Vec<String>> {
+    ASSETS.lock().ok()?.as_ref()?.get(&app_id).cloned()
+}
+
+/// The picture keys of an application (its Rich Presence Art Assets), from Discord's public
+/// API: what `image` and `small_image` can name without a link. Kept for the session.
+pub fn application_assets(app_id: u64) -> Result<Vec<String>, String> {
+    if let Some(known) = known_application_assets(app_id) {
+        return Ok(known);
+    }
+    let (code, body) = public_api(&format!("oauth2/applications/{app_id}/assets"))?;
+    let names = match code.as_str() {
+        "200" => {
+            let list: Value =
+                serde_json::from_str(&body).map_err(|_| "réponse de Discord illisible".to_owned())?;
+            let mut names: Vec<String> = list
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|asset| asset.get("name").and_then(Value::as_str).map(str::to_owned))
+                .collect();
+            names.sort();
+            names
+        }
+        "404" | "400" => Vec::new(),
+        other => return Err(format!("Discord a répondu {other}")),
+    };
+    if let Ok(mut known) = ASSETS.lock() {
+        known
+            .get_or_insert_with(HashMap::new)
+            .insert(app_id, names.clone());
+    }
+    Ok(names)
+}
+
+/// A GET on Discord's public API (no token), through the `curl` Windows ships: the HTTP status
+/// and the body.
+fn public_api(path: &str) -> Result<(String, String), String> {
+    let url = format!("https://discord.com/api/v10/{path}");
+    let mut command = std::process::Command::new(if cfg!(windows) { "curl.exe" } else { "curl" });
+    command.args(["-s", "--max-time", "6", "-w", "\n%{http_code}", &url]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+    let output = command
+        .output()
+        .map_err(|error| format!("curl introuvable ({error})"))?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let (body, code) = text.rsplit_once('\n').unwrap_or(("", text.as_ref()));
+    match code.trim() {
+        "" | "000" => Err("pas de connexion à Internet".to_owned()),
+        code => Ok((code.to_owned(), body.to_owned())),
+    }
+}
+
 /// The applications already looked up this session: their name, or `None` when Discord does
 /// not know the ID.
 static NAMES: Mutex<Option<HashMap<u64, Option<String>>>> = Mutex::new(None);
@@ -792,29 +884,16 @@ pub fn application_name(app_id: u64) -> Result<Option<String>, String> {
     {
         return Ok(known.clone());
     }
-    let url = format!("https://discord.com/api/v10/applications/{app_id}/rpc");
-    let mut command = std::process::Command::new(if cfg!(windows) { "curl.exe" } else { "curl" });
-    command.args(["-s", "--max-time", "6", "-w", "\n%{http_code}", &url]);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x0800_0000);
-    }
-    let output = command
-        .output()
-        .map_err(|error| format!("curl introuvable ({error})"))?;
-    let text = String::from_utf8_lossy(&output.stdout);
-    let (body, code) = text.rsplit_once('\n').unwrap_or(("", text.as_ref()));
-    let found = match code.trim() {
+    let (code, body) = public_api(&format!("applications/{app_id}/rpc"))?;
+    let found = match code.as_str() {
         "200" => Some(
-            serde_json::from_str::<Value>(body)
+            serde_json::from_str::<Value>(&body)
                 .ok()
                 .and_then(|app| app.get("name").and_then(Value::as_str).map(str::to_owned))
                 .ok_or("réponse de Discord illisible")?,
         ),
         // Unknown application, or not even a valid ID.
         "404" | "400" => None,
-        "" | "000" => return Err("pas de connexion à Internet".to_owned()),
         other => return Err(format!("Discord a répondu {other}")),
     };
     if let Ok(mut names) = NAMES.lock() {
@@ -831,23 +910,31 @@ fn now_ms() -> u64 {
         .map_or(0, |elapsed| elapsed.as_millis() as u64)
 }
 
-/// The card's start time, kept while the same card is pushed again.
+/// A card's start time, kept while the same card is pushed again.
+///
+/// One start per card: there used to be a single one for every card, so with two or three
+/// cards each push reset the others' timers to zero. The key is the card's shape and timer
+/// mode, so a new text keeps the elapsed time and a new application or type restarts it.
 ///
 /// A Listening card also needs an end: Discord draws the playback bar from the two
 /// timestamps, and a track that never ends keeps the bar stuck at 100%. When the span
-/// is over the start moves forward, so the bar loops instead of freezing.
+/// is over the start moves forward, so the bar (or a countdown) loops instead of freezing.
 fn start_for(key: &str, span: Option<u64>) -> u64 {
-    static START: OnceLock<Mutex<(String, u64)>> = OnceLock::new();
-    let cell = START.get_or_init(|| Mutex::new((String::new(), now_ms())));
-    let mut kept = match cell.lock() {
+    static STARTS: Mutex<Option<HashMap<String, u64>>> = Mutex::new(None);
+    let mut starts = match STARTS.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     };
-    let now = now_ms();
-    if kept.0 != key || span.is_some_and(|span| now >= kept.1.saturating_add(span)) {
-        *kept = (key.to_owned(), now);
+    let starts = starts.get_or_insert_with(HashMap::new);
+    if starts.len() > 64 {
+        starts.clear();
     }
-    kept.1
+    let now = now_ms();
+    let start = starts.entry(key.to_owned()).or_insert(now);
+    if span.is_some_and(|span| now >= start.saturating_add(span)) {
+        *start = now;
+    }
+    *start
 }
 
 /// A text cut to Discord's `max`, and padded when it is a single character (the pipe refuses
@@ -926,13 +1013,32 @@ fn activity(config: &Config, image: &str, small: &str, buttons: ButtonStyle) -> 
         value["assets"] = assets;
     }
     if config.timer || spotify {
-        let span = (config.kind == 2).then_some(LISTEN_MILLIS);
-        let start = start_for(&config.signature(), span);
-        value["timestamps"] = if config.kind == 2 {
-            json!({ "start": start, "end": start + LISTEN_MILLIS })
-        } else {
-            json!({ "start": start })
+        let key = format!("{}|{:?}", config.shape(), config.timer_mode);
+        value["timestamps"] = match config.timer_mode {
+            // The time of day: a timer started at local midnight.
+            TimerMode::Clock if !spotify => json!({ "start": crate::clock::midnight_ms() }),
+            // Only an end: Discord shows the time left.
+            TimerMode::Countdown(minutes) if !spotify => {
+                let span = u64::from(minutes.max(1)) * 60_000;
+                json!({ "end": start_for(&key, Some(span)) + span })
+            }
+            _ if config.kind == 2 => {
+                let start = start_for(&key, Some(LISTEN_MILLIS));
+                json!({ "start": start, "end": start + LISTEN_MILLIS })
+            }
+            _ => json!({ "start": start_for(&key, None) }),
         };
+    }
+    // "(2 of 4)": Spotify's card keeps its own party (it is what draws the Spotify logo).
+    if let Some((size, max)) = config.party
+        && !spotify
+        && size >= 1
+        && max >= size
+    {
+        value["party"] = json!({
+            "id": format!("spider-{}-{}", config.app_id, config.slot),
+            "size": [size, max],
+        });
     }
     if spotify {
         // The shape Discord's own Spotify integration reads: a Listening activity with a
@@ -2034,6 +2140,55 @@ mod tests {
         assert_eq!(buttons.len(), 2);
         assert_eq!(buttons[0]["label"].as_str().unwrap().chars().count(), 32);
         assert_eq!(buttons[1]["label"], "Third");
+    }
+
+    #[test]
+    fn each_card_keeps_its_own_timer_and_a_new_text_does_not_restart_it() {
+        let start = |config: &Config| {
+            activity(config, "", "", ButtonStyle::Rpc)["timestamps"]["start"]
+                .as_u64()
+                .unwrap()
+        };
+        let mut first = card();
+        first.app_id = 1001;
+        first.slot = 1;
+        let mut second = card();
+        second.app_id = 1002;
+        second.slot = 2;
+        let a = start(&first);
+        std::thread::sleep(Duration::from_millis(30));
+        let b = start(&second);
+        // Pushing the second card used to reset the first one's timer (one shared start).
+        assert_eq!(start(&first), a);
+        assert!(b > a);
+        first.details = "un autre texte".into();
+        assert_eq!(start(&first), a);
+        // A new type is a new activity: its timer starts over.
+        first.kind = 3;
+        assert!(start(&first) > a);
+    }
+
+    #[test]
+    fn countdowns_clocks_and_groups_are_sent_the_way_discord_reads_them() {
+        let mut c = card();
+        c.app_id = 1003;
+        c.timer_mode = TimerMode::Countdown(10);
+        c.party = Some((2, 4));
+        let value = activity(&c, "", "", ButtonStyle::Rpc);
+        // Only an end: Discord shows the time left.
+        assert!(value["timestamps"].get("start").is_none());
+        let end = value["timestamps"]["end"].as_u64().unwrap();
+        let now = now_ms();
+        assert!(end > now && end <= now + 600_000);
+        assert_eq!(value["party"]["size"], json!([2, 4]));
+        c.timer_mode = TimerMode::Clock;
+        let start = activity(&c, "", "", ButtonStyle::Rpc)["timestamps"]["start"]
+            .as_u64()
+            .unwrap();
+        assert!(now - start < 86_400_000);
+        // A group bigger than its maximum is left out rather than refused by Discord.
+        c.party = Some((5, 4));
+        assert!(activity(&c, "", "", ButtonStyle::Rpc).get("party").is_none());
     }
 
     #[test]

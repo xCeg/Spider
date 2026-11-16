@@ -158,3 +158,18 @@ Le journal s'écrit à côté du fichier (`spider.log`), avec l'heure.
 Tests : `cargo test`. Avec Node installé, `tests/cdp.rs` teste aussi le port de debug de bout
 en bout contre un faux Discord (`tests/fake_discord.mjs`) qui exécute le vrai script envoyé à
 Discord.
+
+## Nouveautés de la 1.1
+
+- **Arrière-plan** (menu) : Spider garde ta présence sans fenêtre (`SpiderBackground.exe`), et peut
+  se lancer avec Windows. Rouvrir Spider permet de l'arrêter ou de la reprendre.
+- **Profils** (menu) : enregistre plusieurs configurations et passe de l'une à l'autre.
+- **Rotation** : la première ligne peut changer toute seule (`rotation`, `rotation_seconds`).
+- **`{heure}`, `{date}`, `{jour}`** dans les textes, remplacés à l'envoi.
+- **Groupe** « (2 sur 4) » (`party: [2, 4]`) et **chronomètre** au choix : depuis l'arrivée,
+  heure actuelle ou compte à rebours (`timer_mode`, `countdown_minutes`).
+- **Images de l'application** : dans l'assistant, `Tab` propose les images (Art Assets) de ton app.
+- **Au démarrage** (Configurer) : lancer la présence directement à l'ouverture.
+- Le titre de la fenêtre dit l'état de la présence ; icône et propriétés de fichier pour les `.exe`.
+- Corrigé : avec plusieurs cartes, chaque envoi remettait à zéro le chrono des autres ; un
+  changement de texte ne fait plus clignoter la carte.

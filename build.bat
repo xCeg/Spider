@@ -73,6 +73,13 @@ if errorlevel 1 (
 for %%s in ("Spider.exe") do set /a "SIZE=%%~zs / 1024"
 echo.
 echo   %GOOD%●%R%  %B%Spider.exe est prêt%R%  %FAINT%%SIZE% Ko · %CD%\Spider.exe%R%
+rem  The windowless build for the background mode and the start with Windows.
+copy /Y "target\release\spider-background.exe" "SpiderBackground.exe" >nul 2>nul
+if errorlevel 1 (
+  echo   %WARN%●%R%  SpiderBackground.exe n'a pas pu être remplacé : arrête l'arrière-plan dans Spider, puis relance.
+) else (
+  echo   %GOOD%●%R%  %B%SpiderBackground.exe est prêt%R%  %FAINT%mode arrière-plan et lancement avec Windows%R%
+)
 echo.
 
 rem  3. Spider opens right here, in this window.
