@@ -318,7 +318,8 @@ impl Runner {
                         state: activity.state.clone(),
                         app_id: activity.app_id,
                         image: !activity.image.trim().is_empty(),
-                        small_image: !activity.small_image.trim().is_empty(),
+                        small_image: !activity.small_image.trim().is_empty()
+                            || config::platform(&activity.platform).is_some(),
                         platform: config::platform(&activity.platform),
                         buttons: activity
                             .buttons

@@ -30,7 +30,8 @@ ton PC, par le même canal que les jeux.
 - **Le tableau de bord** : l'état (EN LIGNE, ÉCHEC, EN PAUSE), le transport utilisé, le
   compte, depuis quand, l'aperçu de chaque carte et le journal.
   `P` pause, `R` renvoyer, `E` modifier, `X` arrêter, `Échap` revenir au menu (la présence
-  continue).
+  continue). Si une carte demande le port de debug (« Streame », logo de console) alors qu'il
+  est fermé, le tableau de bord le dit et `D` relance Discord avec lui.
 - **Le diagnostic** : les Discord installés et ouverts (Discord, PTB, Canary) avec leur compte,
   le port de debug, la config et ses avertissements, les applications. `T` publie la vraie
   carte pendant 8 secondes puis la retire : la preuve que tout marche.
@@ -95,7 +96,7 @@ Spider le relit à chaque sauvegarde et la carte suit dans la seconde.
 | `image` / `small_image` | une clé d'image de l'application (Art Assets) ou un lien `https://`. |
 | `image_signer` | l'application qui signe les images `https://` pour le port de debug ; `0` = `app_id`. |
 | `status` | `playing`, `streaming`, `listening`, `watching`, `competing`. |
-| `platform` | `xbox`, `ps5`, `meta_quest` (port de debug seulement). |
+| `platform` | `xbox`, `ps5`, `meta_quest` : une pastille de console sur l'image (partout, si `small_image` est vide) et le logo à côté du nom (port de debug). |
 | `stream_url` | le lien Twitch ou YouTube d'une carte `streaming`. |
 | `buttons` | deux boutons au maximum, `label` (32 caractères) + lien `http(s)://`. |
 | `timer` | affiche le temps écoulé. |
@@ -154,4 +155,6 @@ Le journal s'écrit à côté du fichier (`spider.log`), avec l'heure.
 - `tools/snapper/` : capture la vraie fenêtre dans une console virtuelle, en HTML (pour les
   développeurs).
 
-Tests : `cargo test`.
+Tests : `cargo test`. Avec Node installé, `tests/cdp.rs` teste aussi le port de debug de bout
+en bout contre un faux Discord (`tests/fake_discord.mjs`) qui exécute le vrai script envoyé à
+Discord.

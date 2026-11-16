@@ -28,6 +28,20 @@ use serde_json::{Value, json};
 /// Discord's debug port (start Discord with `--remote-debugging-port=9222`).
 pub const CDP_PORT: u16 = 9222;
 
+/// The debug port Spider talks to: [`CDP_PORT`], unless a test points it at a fake Discord.
+static PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(CDP_PORT);
+
+/// Talks to another debug port (the tests' simulated Discord renderer).
+pub fn set_debug_port(port: u16) {
+    PORT.store(port, Ordering::Relaxed);
+    forget_refusal();
+}
+
+/// The debug port in use.
+pub fn debug_port() -> u16 {
+    PORT.load(Ordering::Relaxed)
+}
+
 /// A fake Listening track lasts this long, then the progress bar starts over.
 const LISTEN_MILLIS: u64 = 240_000;
 
@@ -438,7 +452,7 @@ pub fn available() -> bool {
 
 /// The client that has the debug port open, whatever the chosen one.
 pub fn debug_port_client() -> Option<Client> {
-    let body = http_get(CDP_PORT, "/json").ok()?;
+    let body = http_get(debug_port(), "/json").ok()?;
     let pages: Value = serde_json::from_str(&body).ok()?;
     pages
         .as_array()?
@@ -501,7 +515,7 @@ pub fn restart_with_debug_port() -> Result<Client, String> {
         std::thread::sleep(Duration::from_millis(250));
     }
     std::process::Command::new(&path)
-        .arg(format!("--remote-debugging-port={CDP_PORT}"))
+        .arg(format!("--remote-debugging-port={}", debug_port()))
         .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -1212,17 +1226,14 @@ fn main_window_host(url: &str) -> Option<&str> {
 /// The renderer's WebSocket: its host, port and path.
 fn cdp_page() -> Result<(String, u16, String), String> {
     let wanted = client();
-    let body = http_get(CDP_PORT, "/json")?;
+    let body = http_get(debug_port(), "/json")?;
     let pages: Value = serde_json::from_str(&body).map_err(|error| error.to_string())?;
     let mut other = None;
-    for page in pages.as_array().into_iter().flatten() {
-        if page
-            .get("type")
-            .and_then(Value::as_str)
-            .is_some_and(|kind| kind != "page")
-        {
-            continue;
-        }
+    // Real pages first (a service worker or a frame can carry the same address), the rest
+    // after, in case a Discord build reports its window under another type.
+    let mut targets: Vec<&Value> = pages.as_array().into_iter().flatten().collect();
+    targets.sort_by_key(|page| page.get("type").and_then(Value::as_str) != Some("page"));
+    for page in targets {
         let url = page.get("url").and_then(Value::as_str).unwrap_or_default();
         let Some(host) = main_window_host(url) else {
             continue;
@@ -1232,13 +1243,14 @@ fn cdp_page() -> Result<(String, u16, String), String> {
             other = Some(found);
             continue;
         }
-        let socket = page
+        let Some(split) = page
             .get("webSocketDebuggerUrl")
             .and_then(Value::as_str)
-            .ok_or("port de debug : pas de websocket pour la page Discord")?;
-        if let Some(split) = split_websocket(socket) {
-            return Ok(split);
-        }
+            .and_then(split_websocket)
+        else {
+            continue;
+        };
+        return Ok(split);
     }
     Err(match other {
         Some(found) => format!(

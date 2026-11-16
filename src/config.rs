@@ -195,6 +195,8 @@ impl Settings {
                 return Err(format!("carte {} : le slot {slot} est pris deux fois", index + 1));
             }
             seen.push(slot);
+            let console = platform(&activity.platform);
+            let (small_image, small_text) = corner(activity, console);
             cards.push(Config {
                 app_id: activity.app_id,
                 slot,
@@ -204,10 +206,10 @@ impl Settings {
                 state: activity.state.clone(),
                 image: activity.image.clone(),
                 image_text: activity.image_text.clone(),
-                small_image: activity.small_image.clone(),
-                small_text: activity.small_text.clone(),
+                small_image,
+                small_text,
                 kind: kind(&activity.status),
-                platform: platform(&activity.platform),
+                platform: console,
                 stream_url: activity.stream_url.clone(),
                 buttons: buttons(activity),
                 timer: activity.timer,
@@ -229,7 +231,7 @@ impl Settings {
             }
             if mode == Mode::Rpc && platform(&activity.platform).is_some() {
                 list.push(format!(
-                    "carte {number} : le badge console ne passe que par le port de debug"
+                    "carte {number} : par le pipe, la console n'apparaît qu'en pastille sur l'image"
                 ));
             }
             let dropped = activity
@@ -281,6 +283,33 @@ pub fn platform(platform: &str) -> Option<&'static str> {
         "ps5" | "playstation" => Some("ps5"),
         "meta_quest" | "quest" | "vr" => Some("meta_quest"),
         _ => None,
+    }
+}
+
+/// The console badges Cinnabug used: a picture in the card's corner, which every transport
+/// shows (the pipe drops the `platform` field itself, so this is all a pipe card gets).
+pub const CONSOLE_BADGES: [(&str, &str, &str); 3] = [
+    ("xbox", "https://files.catbox.moe/8uy93z.png", "Xbox"),
+    ("ps5", "https://files.catbox.moe/q3mrvb.png", "PlayStation"),
+    ("meta_quest", "https://files.catbox.moe/29yy6c.png", "VR"),
+];
+
+/// The corner picture and its text: the card's own, else the console's badge.
+fn corner(activity: &Activity, console: Option<&'static str>) -> (String, String) {
+    let own = activity.small_image.trim();
+    if !own.is_empty() {
+        return (own.to_owned(), activity.small_text.clone());
+    }
+    match console.and_then(|console| CONSOLE_BADGES.iter().find(|(word, _, _)| *word == console)) {
+        Some((_, picture, name)) => {
+            let text = if activity.small_text.trim().is_empty() {
+                (*name).to_owned()
+            } else {
+                activity.small_text.clone()
+            };
+            ((*picture).to_owned(), text)
+        }
+        None => (String::new(), activity.small_text.clone()),
     }
 }
 
@@ -433,6 +462,21 @@ mod tests {
         .unwrap();
         let warnings = settings.warnings();
         assert_eq!(warnings.len(), 3, "{warnings:?}");
+    }
+
+    #[test]
+    fn a_console_brings_its_badge_unless_the_card_has_a_corner_picture() {
+        let cards = parse(
+            r#"{"activities":[{"app_id":1,"platform":"xbox"},
+                {"app_id":2,"platform":"ps5","small_image":"mine","small_text":"Mine"}]}"#,
+        )
+        .unwrap()
+        .activities()
+        .unwrap();
+        assert_eq!(cards[0].small_image, CONSOLE_BADGES[0].1);
+        assert_eq!(cards[0].small_text, "Xbox");
+        assert_eq!(cards[1].small_image, "mine");
+        assert_eq!(cards[1].small_text, "Mine");
     }
 
     #[test]

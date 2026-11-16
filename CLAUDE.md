@@ -42,6 +42,15 @@ No AI model identifier in commits or code.
 
 ## Checking a change
 - `cargo test`, `cargo clippy --all-targets`, then `build.bat` (or `cargo build --release`).
+- `tests/cdp.rs` drives the debug-port transport against `tests/fake_discord.mjs` (Node, no
+  dependency): Chromium's `/json` + websocket, pages for Discord/PTB/Canary plus an overlay and a
+  service worker that must be skipped, a fake webpack cache with the `IntlMessagesProxy` trap,
+  and a Canary store that shows cards 60 ms late. `engine::set_debug_port` points the engine at
+  it. Skipped without Node. A real Discord was never relaunched with the port during these
+  checks (it would close the user's client): the CDP script itself is Cinnabug's, unchanged.
+- Console badges: a `platform` without `small_image` gets Cinnabug's badge picture
+  (`config::CONSOLE_BADGES`), which the pipe shows too; the dashboard offers `D` (relaunch
+  Discord with the port) when a card needs the port and it is closed.
 - Look at the real window without opening one: `tools/snapper` runs `Spider.exe` in a
   pseudo-console, sends keys and saves each screen as HTML + text:
   `snapper <exe> <out> 120x30 -- --config <tmp>\spider.json ++ w:2300 s:menu k:{enter} ...`

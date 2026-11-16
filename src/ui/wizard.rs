@@ -153,10 +153,10 @@ const STATUS_CHOICES: [(&str, &str); 5] = [
 ];
 
 const PLATFORM_CHOICES: [(&str, &str); 4] = [
-    ("Ordinateur", "le badge habituel"),
-    ("Xbox", "badge Xbox · port de debug"),
-    ("PlayStation", "badge PS5 · port de debug"),
-    ("Meta Quest", "badge réalité virtuelle · port de debug"),
+    ("Ordinateur", "pas de badge"),
+    ("Xbox", "pastille Xbox sur l'image"),
+    ("PlayStation", "pastille PS5 sur l'image"),
+    ("Meta Quest", "pastille VR sur l'image"),
 ];
 
 const TIMER_CHOICES: [(&str, &str); 2] = [("Oui", "« 12:34 écoulées »"), ("Non", "pas de chronomètre")];
@@ -208,7 +208,7 @@ impl Field {
                 "Un lien Twitch ou YouTube : c'est lui qui donne le statut « en direct »."
             }
             Field::Platform => {
-                "Le badge de console à côté de la carte ; seul le port de debug sait l'afficher."
+                "Une pastille de console sur l'image (si tu n'as pas mis de petite image), et son logo à côté du nom par le port de debug."
             }
             Field::Label1 => "Le texte du premier bouton, 32 caractères au plus. Vide = pas de bouton.",
             Field::Link1 => "Où mène le bouton : un lien https://.",

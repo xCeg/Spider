@@ -647,6 +647,12 @@ impl App {
                     }
                 }
                 Key::Char('e' | 'E') => self.configure()?,
+                Key::Char('d' | 'D') if self.debug_port_missing(&snapshot) => {
+                    self.restart_discord()?;
+                    if let Some(worker) = self.worker.as_ref() {
+                        worker.send(Command::Republish);
+                    }
+                }
                 Key::Char('x' | 'X' | 's' | 'S') => {
                     self.stop_presence()?;
                     return Ok(());
@@ -694,6 +700,20 @@ impl App {
             canvas.text(4, y, &clip(error, canvas.w - 8), Style::fg(ink::BAD));
             y += 2;
         }
+        let missing = self.debug_port_missing(snapshot);
+        if missing {
+            canvas.put(4, y, '●', Style::fg(ink::WARN));
+            canvas.text(
+                6,
+                y,
+                &clip(
+                    "« Streame » et le logo de console passent par le port de debug, fermé : D relance Discord avec lui",
+                    canvas.w - 10,
+                ),
+                Style::fg(ink::MUTED),
+            );
+            y += 2;
+        }
         // The cards side by side when they fit, one under the other otherwise.
         let views: Vec<CardView> = snapshot
             .cards
@@ -735,10 +755,29 @@ impl App {
             }
         }
         let pause = if snapshot.phase == Phase::Paused { "reprendre" } else { "pause" };
-        logo::footer(
-            canvas,
-            &[("P", pause), ("R", "renvoyer"), ("E", "modifier"), ("X", "arrêter"), ("Échap", "menu")],
-        );
+        let mut hints = vec![("P", pause), ("R", "renvoyer"), ("E", "modifier")];
+        if missing {
+            hints.push(("D", "port de debug"));
+        }
+        hints.extend([("X", "arrêter"), ("Échap", "menu")]);
+        logo::footer(canvas, &hints);
+    }
+
+    /// Whether a card asks for something only the debug port shows (Streaming, the console
+    /// logo, or the transport set to it) while the chosen Discord has it closed.
+    fn debug_port_missing(&self, snapshot: &Snapshot) -> bool {
+        let wanted = snapshot.cards.iter().any(|card| card.kind == 1 || card.platform.is_some())
+            || self
+                .settings
+                .as_ref()
+                .is_some_and(|settings| settings.mode() == engine::Mode::Cdp);
+        let open = self
+            .probe
+            .lock()
+            .ok()
+            .and_then(|probe| probe.debug)
+            .is_some_and(|owner| snapshot.client == Client::Auto || owner == snapshot.client);
+        wanted && !open
     }
 
     // --- Diagnostic -----------------------------------------------------------
@@ -1038,7 +1077,8 @@ pub(super) fn view_of(activity: &crate::config::Activity) -> CardView {
         details: activity.details.clone(),
         state: activity.state.clone(),
         image: !activity.image.trim().is_empty(),
-        small_image: !activity.small_image.trim().is_empty(),
+        small_image: !activity.small_image.trim().is_empty()
+            || crate::config::platform(&activity.platform).is_some(),
         platform: crate::config::platform(&activity.platform),
         buttons: activity
             .buttons

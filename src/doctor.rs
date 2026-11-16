@@ -144,7 +144,7 @@ pub fn check(path: &Path) -> Vec<Section> {
             lines.push(line(
                 Level::Good,
                 "Port de debug",
-                format!("ouvert par {} (127.0.0.1:{})", client.label(), engine::CDP_PORT),
+                format!("ouvert par {} (127.0.0.1:{})", client.label(), engine::debug_port()),
             ));
             lines.push(line(
                 Level::Warn,
