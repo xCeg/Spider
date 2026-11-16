@@ -1,0 +1,4 @@
+# The build script must keep Windows line endings (cmd reads batch files line by line).
+*.bat text eol=crlf
+*.rs text eol=lf
+*.md text eol=lf

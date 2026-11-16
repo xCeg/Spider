@@ -1,0 +1,5 @@
+/target
+*.log
+*.json.tmp
+spider.json
+Spider.exe
